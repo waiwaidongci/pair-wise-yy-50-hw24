@@ -29,6 +29,7 @@ const nav = [
       <div class="sidebar-status">
         <div><span :class="{ warn: !store.locked }" />{{ store.locked ? '基线已审批锁定' : `${store.validations.length} 项预检提示` }}</div>
         <small>版本 {{ store.revision }} · 自动保存草稿</small>
+        <RouterLink v-if="store.pendingReviewCount" to="/imposition" class="pending-chip"><i class="pi pi-exclamation-triangle" />{{ store.pendingReviewCount }} 条豁免待复核</RouterLink>
       </div>
     </aside>
     <main><RouterView /></main>
@@ -51,6 +52,8 @@ nav a.router-link-active { color: white; background: #3a555d; box-shadow: inset 
 .sidebar-status span { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: #58b38a; }
 .sidebar-status span.warn { background: #d9a04d; }
 .sidebar-status small { display: block; margin-top: 6px; color: #96a9ae; font-size: 9px; }
+.pending-chip { display: flex; align-items: center; gap: 6px; margin-top: 9px; padding: 6px 8px; border: 1px solid rgba(217,160,77,.45); border-radius: 6px; color: #f3c394; background: rgba(217,160,77,.12); font-size: 10px; font-weight: 700; text-decoration: none; }
+.pending-chip i { font-size: 11px; }
 main { min-width: 0; margin-left: 244px; }
 .mobile-bar { display: none; }
 @media (max-width: 820px) {

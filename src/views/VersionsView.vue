@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import Button from 'primevue/button'
 import Checkbox from 'primevue/checkbox'
 import Tag from 'primevue/tag'
+import Message from 'primevue/message'
 import ImpositionCanvas from '../components/ImpositionCanvas.vue'
 import { useImpositionStore } from '../stores/imposition'
 
@@ -20,8 +21,15 @@ const changes = [
   <section class="page">
     <div class="page-head">
       <div><p class="eyebrow">VERSION COMPARE / 版本对比</p><h1>拼版版本并排审阅</h1><p class="muted">基线 R5 与候选 R6 对比，变更可逐项接受；锁定后生成只读生产版本。</p></div>
-      <div class="actions"><Button label="导出对比报告" icon="pi pi-file-export" outlined /><Button :label="store.locked ? '已锁定' : '接受变更并锁定'" icon="pi pi-lock" :disabled="store.locked || accepted.length === 0" @click="store.lockBaseline" /></div>
+      <div class="actions">
+        <Button label="导出对比报告" icon="pi pi-file-export" outlined />
+        <Button :label="store.locked ? '已锁定' : '接受变更并锁定'" icon="pi pi-lock" :disabled="store.locked || accepted.length === 0 || store.lockBlocked" :title="store.lockBlocked ? '有待复核豁免，不能锁定当前版本' : ''" @click="store.lockBaseline" />
+      </div>
     </div>
+
+    <Message v-if="store.pendingReviewCount" severity="warn" :closable="false" class="mb-3">
+      待复核豁免 {{ store.pendingReviewCount }} 条（与总览、拼版预检同一数量）：版位、出血或装订变更后须重新校验并绑定当前指纹，否则不能锁定版本。
+    </Message>
 
     <div class="compare-grid">
       <section class="panel">
@@ -44,20 +52,33 @@ const changes = [
         </article>
       </div>
     </section>
+
+    <section class="panel change-panel">
+      <div class="panel-head"><h3>待复核豁免（{{ store.pendingReviewCount }}）</h3><Button label="前往拼版预检重新校验" text size="small" @click="$router.push('/imposition')" /></div>
+      <div v-if="!store.pendingReviewCount" class="review-empty"><i class="pi pi-check-circle" /><span>无待复核豁免，所有放行均绑定当前版位指纹。</span></div>
+      <div v-else class="change-list">
+        <article v-for="waiver in store.waivers.filter((item) => item.status === '待复核')" :key="waiver.id">
+          <div><strong>{{ waiver.id }} · {{ waiver.issueId }}</strong><div class="diff"><span class="before">{{ waiver.fingerprint || '未绑定指纹' }}</span><i class="pi pi-arrow-right" /><span class="after">{{ waiver.layoutSummary || '待绑定当前版位摘要' }}</span></div></div>
+          <Tag value="待复核" severity="warn" />
+        </article>
+      </div>
+    </section>
   </section>
 </template>
 
 <style scoped>
 .actions { display: flex; gap: 8px; }
+.mb-3 { margin-bottom: 12px; }
 .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
 .candidate { border-color: #5d9693; }
 .canvas-box { height: 440px; overflow: auto; padding: 12px; background: #35474d; }
-.change-panel { overflow: hidden; }
+.change-panel { overflow: hidden; margin-bottom: 14px; }
 .change-list article { display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; align-items: center; padding: 14px 16px; border-bottom: 1px solid #edf1f1; }
 .change-list strong { font-size: 12px; }
 .diff { display: flex; align-items: center; gap: 8px; margin-top: 7px; font-family: monospace; font-size: 10px; }
 .diff span { padding: 4px 6px; border-radius: 4px; }
 .before { color: #9f4c38; background: #fff0ec; }
 .after { color: #2d735b; background: #e9f5ef; }
+.review-empty { display: flex; align-items: center; gap: 8px; padding: 16px; color: #3b8a67; font-size: 12px; }
 @media (max-width: 1000px) { .compare-grid { grid-template-columns: 1fr; } }
 </style>

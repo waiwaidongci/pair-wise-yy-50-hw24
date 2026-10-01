@@ -8,6 +8,10 @@ import { useImpositionStore } from '../stores/imposition'
 const store = useImpositionStore()
 const errors = computed(() => store.validations.filter((item) => item.severity === '错误').length)
 const pendingProof = computed(() => store.proofs.find((proof) => proof.decision === '待决定'))
+
+function issueTitle(issueId: string) {
+  return store.validations.find((item) => item.id === issueId)?.title ?? issueId
+}
 </script>
 
 <template>
@@ -20,6 +24,7 @@ const pendingProof = computed(() => store.proofs.find((proof) => proof.decision 
     <div class="metric-grid">
       <article class="metric"><span>页面文件</span><strong>{{ store.pages.length }}</strong><small>{{ store.positions.length }} 个已排版位</small></article>
       <article class="metric"><span>预检错误</span><strong class="error">{{ errors }}</strong><small>必须处理后方可锁定</small></article>
+      <article class="metric"><span>待复核豁免</span><strong :class="{ warn: store.pendingReviewCount }">{{ store.pendingReviewCount }}</strong><small>指纹失效，需重新校验</small></article>
       <article class="metric"><span>打样轮次</span><strong>{{ store.proofs.length }}</strong><small>当前 ΔE {{ pendingProof?.deltaE ?? '—' }}</small></article>
       <article class="metric"><span>待恢复导出</span><strong>{{ store.tasks.filter((task) => task.resumable && task.status !== '已完成').length }}</strong><small>断点可继续</small></article>
     </div>
@@ -41,6 +46,21 @@ const pendingProof = computed(() => store.proofs.find((proof) => proof.decision 
           <div><i class="pi pi-times-circle error" /><span>出血与版位安全区</span><Tag :value="`${errors} 项错误`" severity="danger" /></div>
           <div><i class="pi pi-check-circle" /><span>色彩控制条与纸张规格</span><Tag value="通过" severity="success" /></div>
         </div>
+
+        <section class="panel review-panel">
+          <div class="panel-head"><h3>待复核豁免（{{ store.pendingReviewCount }}）</h3><Button label="前往拼版预检" text size="small" @click="$router.push('/imposition')" /></div>
+          <div v-if="!store.pendingReviewCount" class="review-empty"><i class="pi pi-check-circle" /><span>所有豁免均绑定当前指纹，版位/出血/装订变更后将在此重新列出。</span></div>
+          <div v-else class="review-list">
+            <article v-for="waiver in store.waivers.filter((item) => item.status === '待复核')" :key="waiver.id">
+              <div>
+                <strong>{{ waiver.id }} · {{ issueTitle(waiver.issueId) }}</strong>
+                <small>{{ waiver.reason }}</small>
+                <small class="fp">指纹 {{ waiver.fingerprint.slice(0, 8) || '未绑定' }} · {{ waiver.layoutSummary || '旧数据待升级' }}</small>
+              </div>
+              <Button label="重新校验" size="small" outlined @click="$router.push('/imposition')" />
+            </article>
+          </div>
+        </section>
       </section>
 
       <aside>
@@ -71,6 +91,7 @@ const pendingProof = computed(() => store.proofs.find((proof) => proof.decision 
 <style scoped>
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .metric .error { color: #b84e35; }
+.metric .warn { color: #c47f2c; }
 .overview-grid { display: grid; grid-template-columns: minmax(0,1fr) 350px; gap: 14px; align-items: start; }
 .project-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 22px; }
 .project-card strong { font-size: 17px; }
@@ -82,6 +103,15 @@ const pendingProof = computed(() => store.proofs.find((proof) => proof.decision 
 .checklist i { color: #3b8a67; }
 .checklist i.warn { color: #c4872f; }
 .checklist i.error { color: #bb4c35; }
+.review-panel { margin: 0 18px 16px; }
+.review-panel .panel-head { min-height: 44px; padding: 8px 0; }
+.review-list article { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-top: 1px solid #edf1f1; }
+.review-list strong, .review-list small { display: block; }
+.review-list strong { font-size: 11px; }
+.review-list small { margin-top: 3px; color: #7a878e; font-size: 10px; }
+.review-list .fp { font-family: monospace; font-size: 9px; color: #9aa6aa; }
+.review-empty { display: flex; align-items: center; gap: 8px; padding: 12px 0; color: #7a878e; font-size: 11px; }
+.review-empty i { color: #3b8a67; }
 aside { display: grid; gap: 14px; }
 .proof-summary { padding: 8px 16px 14px; }
 .proof-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid #edf1f1; }
