@@ -1,21 +1,29 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
+import {
+  armWriteFailure,
+  commitBatch,
+  commitInvalidations,
+  detectInvalidations,
+  detectResolved,
+  loadLedger,
+  nextRecordNo,
+  stampOpenVersion,
+  type CommitResult,
+  type Exemption,
+  type LedgerState,
+  type ReviewConflictError,
+} from '../services/reviewLedger'
+import { bindIssue, computeLayoutDigest, fingerprintMatchesIssue, type LayoutInput } from '../services/issueFingerprint'
 
 export type Page = { pageNo: number; name: string; width: number; height: number; bleed: number; content: string }
 export type Position = { id: string; pageNo: number; x: number; y: number; rotation: number; front: boolean }
 export type Validation = { id: string; severity: '错误' | '警告'; pageNo?: number; title: string; detail: string }
 export type Proof = { id: string; round: number; date: string; sample: string; deltaE: number; feedback: string; correction: string; owner: string; decision: '待决定' | '通过' | '退回' }
 export type ExportTask = { id: string; name: string; progress: number; status: '排队中' | '生成中' | '已完成' | '已中断'; updatedAt: string; resumable: boolean }
+export type Station = '拼版工位' | '审批工位'
 
-export const sheetSpec = {
-  width: 720,
-  height: 1020,
-  bleed: 3,
-  safe: 5,
-  gutter: 6,
-  binding: '骑马订',
-  grain: '纵向',
-}
+const sheetDefaults = { width: 720, height: 1020, bleed: 3, safe: 5, gutter: 6, binding: '骑马订', grain: '纵向' }
 
 const seedPages: Page[] = [
   { pageNo: 1, name: '封面', width: 210, height: 297, bleed: 3, content: '潮汐来信 / 节目册' },
@@ -59,16 +67,48 @@ export const useImpositionStore = defineStore('imposition', () => {
   const side = ref<'front' | 'back'>('front')
   const zoom = ref(72)
   const revision = ref(restored?.revision ?? 'R6')
-  const locked = ref(restored?.locked ?? false)
+  const binding = ref(restored?.binding ?? sheetDefaults.binding)
+  const grain = ref(restored?.grain ?? sheetDefaults.grain)
   const selectedPosition = ref<string | null>(null)
   const selectedProof = ref('PRF-02')
+
+  // ── 复核记录（豁免 + 审计同一份账） ─────────────────────────────
+  const station = ref<Station>('拼版工位')
+  const ledger = ref<LedgerState>(loadLedger())
+  // 打开页面时的版本：两个工位同时保存时只接受这个版本
+  const sessionDocVersion = ref(ledger.value.docVersion)
+  const revalidationError = ref('')
+  let chain: Promise<void> = Promise.resolve()
+  let revalidateTimer: ReturnType<typeof setTimeout> | undefined
+
+  const locked = ref(ledger.value.lock !== null)
+
+  const layoutInput = computed<LayoutInput>(() => ({
+    positions: positions.value,
+    pages: pages.value,
+    binding: binding.value,
+    grain: grain.value,
+    sheetBleed: sheetDefaults.bleed,
+  }))
+  const layoutDigest = computed(() => computeLayoutDigest(layoutInput.value))
+  const layoutCtx = computed(() => ({
+    layoutDigest: layoutDigest.value,
+    positions: positions.value.map((p) => ({ id: p.id, pageNo: p.pageNo, x: p.x, y: p.y, rotation: p.rotation, front: p.front })),
+    pages: pages.value.map((p) => ({ pageNo: p.pageNo, bleed: p.bleed })),
+    binding: binding.value,
+    grain: grain.value,
+  }))
+
+  // 打开页面：为当前版本留一份版位快照，作为之后并发冲突的比对基线
+  ledger.value = stampOpenVersion(ledger.value, layoutCtx.value)
+  sessionDocVersion.value = ledger.value.docVersion
 
   const validations = computed<Validation[]>(() => {
     const issues: Validation[] = []
     const placedPages = positions.value.map((position) => position.pageNo)
     pages.value.forEach((page) => {
       if (!placedPages.includes(page.pageNo)) issues.push({ id: `missing-${page.pageNo}`, severity: '错误', pageNo: page.pageNo, title: `P${page.pageNo} 尚未拼版`, detail: `${page.name} 未出现在正反版位中。` })
-      if (page.bleed < sheetSpec.bleed) issues.push({ id: `bleed-${page.pageNo}`, severity: '错误', pageNo: page.pageNo, title: `P${page.pageNo} 出血不足`, detail: `页面出血 ${page.bleed}mm，低于印刷要求 ${sheetSpec.bleed}mm。` })
+      if (page.bleed < sheetDefaults.bleed) issues.push({ id: `bleed-${page.pageNo}`, severity: '错误', pageNo: page.pageNo, title: `P${page.pageNo} 出血不足`, detail: `页面出血 ${page.bleed}mm，低于印刷要求 ${sheetDefaults.bleed}mm。` })
     })
     for (let index = 0; index < positions.value.length; index += 1) {
       for (let next = index + 1; next < positions.value.length; next += 1) {
@@ -80,13 +120,78 @@ export const useImpositionStore = defineStore('imposition', () => {
       }
     }
     const frontOrder = positions.value.filter((item) => item.front).sort((a, b) => a.x - b.x || a.y - b.y).map((item) => item.pageNo)
-    if (frontOrder[0] !== 1) issues.push({ id: 'binding-order', severity: '警告', pageNo: 1, title: '骑马订正版页序需要复核', detail: `当前首位为 P${frontOrder[0]}，装订方向规则期望封面位于首版位。` })
+    if (binding.value === '骑马订' && frontOrder[0] !== 1) issues.push({ id: 'binding-order', severity: '警告', pageNo: 1, title: '骑马订正版页序需要复核', detail: `当前首位为 P${frontOrder[0]}，${binding.value}规则期望封面位于首版位。` })
     return issues
   })
 
-  watch([pages, positions, proofs, tasks, revision, locked], () => {
-    localStorage.setItem('print-imposition-v1', JSON.stringify({ pages: pages.value, positions: positions.value, proofs: proofs.value, tasks: tasks.value, revision: revision.value, locked: locked.value }))
-  }, { deep: true })
+  // ── 豁免与预检条目的对应 ────────────────────────────────────────
+  const activeExemptions = computed<Exemption[]>(() => ledger.value.exemptions.filter((item) => item.status === 'active'))
+  const pendingReviewCount = computed(() => ledger.value.exemptions.filter((item) => item.status === 'pending_review').length)
+  const invalidExemptions = computed(() => ledger.value.exemptions.filter((item) => item.status === 'invalid'))
+
+  const exemptionByIssue = computed<Map<string, Exemption>>(() => {
+    const map = new Map<string, Exemption>()
+    validations.value.forEach((issue) => {
+      const bindingInfo = bindIssue(issue.id, layoutInput.value)
+      if (!bindingInfo) return
+      const hit = activeExemptions.value.find((exemption) => {
+        if (!exemption.fingerprint) return false
+        return (
+          exemption.fingerprint.code === bindingInfo.fingerprint.code &&
+          exemption.fingerprint.ruleVersion === bindingInfo.fingerprint.ruleVersion &&
+          exemption.fingerprint.args === bindingInfo.fingerprint.args
+        )
+      })
+      if (hit) map.set(issue.id, hit)
+    })
+    return map
+  })
+
+  const coveredIssueIds = computed(() => new Set(exemptionByIssue.value.keys()))
+  const blockingErrors = computed(() => validations.value.filter((item) => item.severity === '错误' && !coveredIssueIds.value.has(item.id)))
+  const lockBasis = computed(() => ledger.value.lock)
+  const lockMismatch = computed(() => locked.value && lockBasis.value !== null && lockBasis.value.layoutDigest !== layoutDigest.value)
+
+  watch(
+    [pages, positions, proofs, tasks, revision, locked, binding, grain],
+    () => {
+      localStorage.setItem(
+        'print-imposition-v1',
+        JSON.stringify({ pages: pages.value, positions: positions.value, proofs: proofs.value, tasks: tasks.value, revision: revision.value, locked: locked.value, binding: binding.value, grain: grain.value }),
+      )
+    },
+    { deep: true },
+  )
+
+  // ── 版位 / 出血 / 装订方向一变：豁免立即失效并重新校验 ───────────
+  function scheduleRevalidate() {
+    revalidationError.value = ''
+    clearTimeout(revalidateTimer)
+    revalidateTimer = setTimeout(() => {
+      chain = chain.then(runRevalidation)
+    }, 120)
+  }
+
+  async function runRevalidation() {
+    const snap = { ...layoutCtx.value, revision: revision.value }
+    const current = ledger.value
+    const due = [
+      ...detectInvalidations(current, snap),
+      ...detectResolved(current, snap, (fp) => fingerprintMatchesIssue(fp, validations.value.map((issue) => issue.id), layoutInput.value)),
+    ]
+    if (!due.length) return
+    try {
+      const { ledger: next } = await commitInvalidations(ledger.value.docVersion, station.value, due, snap)
+      ledger.value = next
+      // 本地拖动产生的系统作废属于本工位版本演进，会话基线随之前进；
+      // 另一工位的模拟保存不更新会话基线，下次保存才会撞版本冲突。
+      sessionDocVersion.value = next.docVersion
+    } catch (error) {
+      revalidationError.value = error instanceof Error ? error.message : '重新校验写回失败'
+    }
+  }
+
+  watch([positions, pages, binding, grain], scheduleRevalidate, { deep: true })
 
   function updatePosition(id: string, patch: Partial<Position>) {
     if (locked.value) return
@@ -99,6 +204,12 @@ export const useImpositionStore = defineStore('imposition', () => {
     positions.value.push({ id: `P-${Date.now().toString().slice(-3)}`, pageNo, x: 34, y: 44, rotation: 0, front: side.value === 'front' })
   }
 
+  function updatePage(pageNo: number, patch: Partial<Page>) {
+    if (locked.value) return
+    const page = pages.value.find((item) => item.pageNo === pageNo)
+    if (page) Object.assign(page, patch)
+  }
+
   function updateProof(id: string, patch: Partial<Proof>) {
     const proof = proofs.value.find((item) => item.id === id)
     if (proof) Object.assign(proof, patch)
@@ -108,13 +219,110 @@ export const useImpositionStore = defineStore('imposition', () => {
     proofs.value.push({ id: `PRF-${String(proofs.value.length + 1).padStart(2, '0')}`, round: proofs.value.length + 1, date: new Date().toISOString().slice(0, 10), sample: `数字样张 v${proofs.value.length + 1}`, deltaE: 0, feedback: '', correction: '', owner: '当前用户', decision: '待决定' })
   }
 
-  function lockBaseline() {
-    locked.value = true
-    revision.value = `R${Number(revision.value.slice(1)) + 1}`
+  // ── 放行豁免：指纹 + 当次版位摘要，乐观并发 + 原记录号重试 ───────
+  function beginRecord(): string {
+    return nextRecordNo()
   }
 
-  function unlock() {
+  async function saveExemption(issueId: string, reason: string, recordNo: string): Promise<CommitResult> {
+    const bindingInfo = bindIssue(issueId, layoutInput.value)
+    if (!bindingInfo) throw new Error('该预检条目已不存在，请重新校验。')
+    const result = await commitBatch(
+      sessionDocVersion.value,
+      station.value,
+      {
+        kind: 'grant',
+        recordNo,
+        fingerprint: bindingInfo.fingerprint,
+        scope: bindingInfo.scope,
+        scopeRef: bindingInfo.scopeRef,
+        scopeLabel: bindingInfo.scopeLabel,
+        scopeSnapshot: bindingInfo.scopeSnapshot,
+        layoutDigest: layoutDigest.value,
+        reason,
+        revision: revision.value,
+      },
+      layoutCtx.value,
+    )
+    ledger.value = result.ledger
+    sessionDocVersion.value = result.ledger.docVersion
+    return result
+  }
+
+  async function reviewLegacy(exemptionId: string, approve: boolean, reason: string, recordNo: string, issueId?: string): Promise<CommitResult> {
+    const exemption = ledger.value.exemptions.find((item) => item.id === exemptionId)
+    if (!exemption) throw new Error('豁免记录不存在。')
+    if (approve) {
+      const targetIssue = issueId ?? matchingIssueForLegacy(exemption)
+      if (!targetIssue) throw new Error('当前预检中没有对应问题，无法补绑指纹；请驳回该历史豁免。')
+      const bindingInfo = bindIssue(targetIssue, layoutInput.value)
+      if (!bindingInfo) throw new Error('预检条目无法生成指纹。')
+      const result = await commitBatch(
+        sessionDocVersion.value,
+        station.value,
+        { kind: 'confirm_legacy', recordNo, exemptionId, fingerprint: bindingInfo.fingerprint, scope: bindingInfo.scope, scopeRef: bindingInfo.scopeRef, scopeLabel: bindingInfo.scopeLabel, scopeSnapshot: bindingInfo.scopeSnapshot, layoutDigest: layoutDigest.value, revision: revision.value },
+        layoutCtx.value,
+      )
+      ledger.value = result.ledger
+      sessionDocVersion.value = result.ledger.docVersion
+      return result
+    }
+    const result = await commitBatch(sessionDocVersion.value, station.value, { kind: 'reject_legacy', recordNo, exemptionId, reason, revision: revision.value }, layoutCtx.value)
+    ledger.value = result.ledger
+    sessionDocVersion.value = result.ledger.docVersion
+    return result
+  }
+
+  function matchingIssueForLegacy(exemption: Exemption): string | null {
+    if (exemption.scopeRef === 'sheet') return validations.value.find((issue) => issue.id === 'binding-order')?.id ?? null
+    const pageNo = Number(exemption.scopeRef.replace('P', ''))
+    return validations.value.find((issue) => issue.pageNo === pageNo && issue.id.startsWith('bleed-'))?.id ?? null
+  }
+
+  // 冲突后以当前服务器版本为基线重新打开（填写内容由各弹窗自行保留）
+  function rebaseSession() {
+    const fresh = stampOpenVersion(ledger.value, layoutCtx.value)
+    ledger.value = fresh
+    sessionDocVersion.value = fresh.docVersion
+    revalidationError.value = ''
+  }
+
+  async function lockBaseline(recordNo: string): Promise<CommitResult> {
+    const basis = {
+      revision: revision.value,
+      layoutDigest: layoutDigest.value,
+      docVersion: sessionDocVersion.value,
+      activeExemptionIds: activeExemptions.value.map((item) => item.id),
+      operator: station.value === '审批工位' ? '周默' : '林青',
+      station: station.value,
+      at: new Date().toISOString(),
+    }
+    const result = await commitBatch(sessionDocVersion.value, station.value, { kind: 'lock', recordNo, basis, revision: revision.value }, layoutCtx.value)
+    ledger.value = result.ledger
+    sessionDocVersion.value = result.ledger.docVersion
+    locked.value = true
+    return result
+  }
+
+  async function unlock(recordNo: string): Promise<CommitResult> {
+    const result = await commitBatch(sessionDocVersion.value, station.value, { kind: 'unlock', recordNo, revision: revision.value }, layoutCtx.value)
+    ledger.value = result.ledger
+    sessionDocVersion.value = result.ledger.docVersion
     locked.value = false
+    return result
+  }
+
+  // ── 演示 / 联调用：模拟另一工位并发保存、写入失败 ────────────────
+  async function otherStationSaved(scenario: 'move' | 'bleed' | 'lock'): Promise<void> {
+    const { simulateConcurrentSave } = await import('../services/reviewLedger')
+    const next = await simulateConcurrentSave(ledger.value.docVersion, scenario === 'lock' ? '审批工位' : '拼版工位', revision.value, layoutCtx.value, scenario)
+    ledger.value = next
+    // 故意不更新 sessionDocVersion：本工位仍拿着打开时的旧版本
+    if (scenario === 'lock') locked.value = true
+  }
+
+  function armFailure() {
+    armWriteFailure()
   }
 
   function resumeTask(id: string) {
@@ -126,5 +334,54 @@ export const useImpositionStore = defineStore('imposition', () => {
     }
   }
 
-  return { pages, positions, proofs, tasks, side, zoom, revision, locked, selectedPosition, selectedProof, validations, updatePosition, addPosition, updateProof, createProof, lockBaseline, unlock, resumeTask }
+  return {
+    // 数据
+    pages,
+    positions,
+    proofs,
+    tasks,
+    side,
+    zoom,
+    revision,
+    binding,
+    grain,
+    locked,
+    selectedPosition,
+    selectedProof,
+    station,
+    sheetDefaults,
+    // 复核
+    ledger,
+    sessionDocVersion,
+    validations,
+    layoutDigest,
+    activeExemptions,
+    invalidExemptions,
+    pendingReviewCount,
+    exemptionByIssue,
+    coveredIssueIds,
+    blockingErrors,
+    lockBasis,
+    lockMismatch,
+    revalidationError,
+    // 版位编辑
+    updatePosition,
+    addPosition,
+    updatePage,
+    updateProof,
+    createProof,
+    // 复核记录操作
+    beginRecord,
+    saveExemption,
+    reviewLegacy,
+    matchingIssueForLegacy,
+    rebaseSession,
+    lockBaseline,
+    unlock,
+    otherStationSaved,
+    armFailure,
+    resumeTask,
+  }
 })
+
+export type { ReviewConflictError }

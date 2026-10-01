@@ -13,6 +13,7 @@ const nav = [
   { to: '/', label: '生产总览', icon: 'pi pi-chart-pie' },
   { to: '/imposition', label: '拼版工作区', icon: 'pi pi-th-large' },
   { to: '/proofs', label: '打样审批', icon: 'pi pi-image' },
+  { to: '/review', label: '复核记录', icon: 'pi pi-shield' },
   { to: '/versions', label: '版本对比', icon: 'pi pi-copy' },
   { to: '/exports', label: '导出任务', icon: 'pi pi-download' },
 ]
@@ -27,8 +28,9 @@ const nav = [
         <RouterLink v-for="item in nav" :key="item.to" :to="item.to" @click="mobileOpen = false"><i :class="item.icon" />{{ item.label }}</RouterLink>
       </nav>
       <div class="sidebar-status">
-        <div><span :class="{ warn: !store.locked }" />{{ store.locked ? '基线已审批锁定' : `${store.validations.length} 项预检提示` }}</div>
-        <small>版本 {{ store.revision }} · 自动保存草稿</small>
+        <div><span :class="{ warn: store.lockMismatch, danger: store.pendingReviewCount > 0 }" />{{ store.lockMismatch ? '锁定依据与当前版位不一致' : store.locked ? `基线已锁定 · 摘要 ${store.layoutDigest.slice(0, 6)}` : `${store.blockingErrors.length} 项未放行错误` }}</div>
+        <div class="review-link" @click="$router.push('/review')"><i class="pi pi-shield" />{{ store.pendingReviewCount }} 条豁免待复核</div>
+        <small>版本 {{ store.revision }} · 记录 V{{ store.sessionDocVersion }} · {{ store.station }}</small>
       </div>
     </aside>
     <main><RouterView /></main>
@@ -50,6 +52,9 @@ nav a.router-link-active { color: white; background: #3a555d; box-shadow: inset 
 .sidebar-status div { font-size: 11px; font-weight: 700; }
 .sidebar-status span { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: #58b38a; }
 .sidebar-status span.warn { background: #d9a04d; }
+.sidebar-status span.danger { background: #d76a4f; }
+.review-link { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding: 6px 8px; border-radius: 6px; color: #e8c48b; background: rgba(217,160,77,.12); font-size: 11px; cursor: pointer; }
+.review-link:hover { background: rgba(217,160,77,.22); }
 .sidebar-status small { display: block; margin-top: 6px; color: #96a9ae; font-size: 9px; }
 main { min-width: 0; margin-left: 244px; }
 .mobile-bar { display: none; }
